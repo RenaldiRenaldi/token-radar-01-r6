@@ -20,28 +20,19 @@ const coverage = D.rows.filter(r => r.watch).length;
 const integrity = V.integrity;
 const walk = V.replay;
 const four = V.heldOutFour;
-const topFarm = D.rows.find(r => r.farm.verdict === 'FARM' && r.farm.base.net > 0);
 $('date').textContent = D.asOf;
-$('page-title').textContent = `Soundings B3 · LOO ${miss3(V.loo.median)} · walk-forward ${miss3(walk.median)}`;
-$('page-subtitle').innerHTML = `Farm-first launch decisions with priced conformal ranges.<br>Every number traces back to the sealed protocol snapshot.`;
 $('kpis').innerHTML = [
-  [miss3(V.loo.median), 'LOO median'],
-  [miss3(walk.median), 'Walk-forward median'],
-  [four.loo.n + ' / 4 ways', 'Held-out count'],
-  [integrity.protocols, 'Protocols covered'],
-  [V.refits, 'Deterministic refits'],
-  [integrity.anchors, 'Anchors'],
-  [integrity.quarantined, 'Quarantined'],
-  [V.farmCounts?.FARM ?? 0, 'FARM rows'],
+  [D.ledger.length, 'Protocols audited'],
+  [coverage + ' / ' + D.watchlistSize, 'Watchlist coverage'],
+  [D.rows.length, 'Ranked launches'],
+  [miss3(V.loo.median), 'B3 median held-out miss'],
+  [V.refits, 'Token-block refits'],
 ].map(([value, label]) => `<div class="metric"><strong>${value}</strong><small>${label}</small></div>`).join('');
 
 function integrityStrip() {
   const reasons = Object.entries(integrity.quarantineReasons).map(([reason, count]) => `${count} ${escape(reason)}`).join(' · ');
   return `<section class="integrity" aria-label="Snapshot integrity"><strong>SEALED ${escape(D.asOf)}</strong><span>${integrity.protocols} protocols</span><span>${integrity.anchors} anchors</span><span>${integrity.quarantined} quarantined <em>${reasons}</em></span><span>${integrity.missingListingDates} missing listing dates</span><span>${integrity.outsideTestWindows} outside test windows</span><span>${integrity.refits} refits</span><span class="farm-kpi">FARM ${V.farmCounts?.FARM ?? 0} · THIN ${V.farmCounts?.THIN ?? 0} · SKIP ${V.farmCounts?.SKIP ?? 0}</span></section>`;
 }
-$('integrity-cover').innerHTML = integrityStrip();
-$('farm-cover').innerHTML = topFarm ? `<span class="pre">FARM FIRST</span> <strong>${escape(topFarm.name)}</strong> · ${escape(topFarm.category ?? 'Unclassified')} · $1K expected net <b>${cash(topFarm.farm.base.net)}</b> · sized capital $1,000 · ${escape(topFarm.farm.chain)}` : '<span class="warn">No positive FARM verdict in this snapshot.</span>';
-$('conformal-cover').innerHTML = `<span class="pre">CONFORMAL PRICING</span> ${V.conformalKinds.slice(0, 3).map(k => `${escape(k.kind)} ${money(k.low)}–${money(k.high)} · price ${cash(k.price)}`).join(' &nbsp; · &nbsp; ')}`;
 
 function audit() {
   return head('VALIDATION', 'Evidence desk') + `<div class="pad">
@@ -67,11 +58,7 @@ function detail(r) {
   return head('PROTOCOL', escape(r.name), r.rank ? '#' + r.rank : r.status.toUpperCase()) + `<div class="pad">
     <div class="cap">${money(r.implied_value_usd)}</div>
     <p class="hint">${r.rank ? 'Conditional circulating cap' : 'Diagnostic fitted cap'} · ${escape(r.category)}</p>
-    ${stat('Peer odds within 3×', pct(r.odds.probability / 100) + ' · age decay ' + r.odds.ageDecay.toFixed(3), 'good')}
-    ${stat('Anchor calibration', r.odds.observed.toFixed(1) + '% observed · n=' + r.odds.n)}
     ${stat('Held-out residual range', range(r.band, money))}
-    ${stat('Conformal range · ' + escape(r.conformal.kind), range([r.conformal.low, r.conformal.high], money))}
-    ${stat('Interval price at $1K', cash(r.conformal.price), 'warn')}
     ${stat('Refit cap · 80%', r.stability ? range(r.stability.value80, money) : '—')}
     ${stat('Full refit rank span', r.stability ? range([r.stability.rankMin, r.stability.rankMax]) : '—')}
     ${stat('Browser recomputation', top === r.implied_value_usd ? 'MATCH ✓' : 'MISMATCH', top === r.implied_value_usd ? 'good' : 'warn')}
@@ -133,7 +120,7 @@ function renderBook() {
     const label = launch ? (r.watch ? 'Watchlist · ' : '') + (r.category ?? 'Unclassified') : r.status + ' · ' + (r.category ?? 'Unclassified');
     return `<tr class="${state.selected === r.slug ? 'selected' : ''}">
       <td>${r.rank ?? '·'}</td>
-      <td><button class="rowlink" data-slug="${escape(r.slug)}">${escape(r.name)}</button><span class="sub">${escape(label)}</span><span class="equation">${escape(r.equation)}</span></td>
+      <td><button class="rowlink" data-slug="${escape(r.slug)}">${escape(r.name)}</button><span class="sub">${escape(label)}</span></td>
       <td>${money(r.tvl_usd)}</td><td class="good">${money(r.implied_value_usd)}</td>
       <td>${r.stability ? range(r.stability.rank80) : '—'}</td><td class="${n > 0 ? 'good' : 'warn'}">${cash(n)}</td>
     </tr>`;
@@ -199,9 +186,6 @@ function setView(view) {
   const book = view === 'launch' || view === 'universe';
   $('workspace').hidden = !book;
   $('extra').hidden = book;
-  $('integrity-cover').hidden = !book;
-  $('farm-cover').hidden = !book;
-  $('conformal-cover').hidden = !book;
   if (book) {
     state.scope = view === 'launch' ? 'All launches' : 'All protocols';
     $('search').value = '';
