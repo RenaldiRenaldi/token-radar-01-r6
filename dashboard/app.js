@@ -48,6 +48,8 @@ function detail(r) {
   return head('PROTOCOL', escape(r.name), r.rank ? '#' + r.rank : r.status.toUpperCase()) + `<div class="pad">
     <div class="cap">${money(r.implied_value_usd)}</div>
     <p class="hint">${r.rank ? 'Conditional circulating cap' : 'Diagnostic fitted cap'} · ${escape(r.category)}</p>
+    ${stat('Peer odds within 3×', pct(r.odds.probability / 100) + ' · age decay ' + r.odds.ageDecay.toFixed(3), 'good')}
+    ${stat('Anchor calibration', r.odds.observed.toFixed(1) + '% observed · n=' + r.odds.n)}
     ${stat('Held-out residual range', range(r.band, money))}
     ${stat('Refit cap · 80%', r.stability ? range(r.stability.value80, money) : '—')}
     ${stat('Full refit rank span', r.stability ? range([r.stability.rankMin, r.stability.rankMax]) : '—')}

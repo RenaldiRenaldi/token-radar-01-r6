@@ -1,227 +1,50 @@
 export interface Protocol {
-  slug: string;
-  name: string;
-  category: string | null;
-  chains: string[];
-  tvl_usd: number;
-  change_7d: number | null;
-  mcap_usd: number | null;
-  listed_at: string | null;
-  gecko_id: string | null;
-  symbol: string | null;
+  slug: string; name: string; category: string | null; chains: string[];
+  tvl_usd: number; change_7d: number | null; mcap_usd: number | null;
+  listed_at: string | null; gecko_id: string | null; symbol: string | null;
 }
-
-export interface Snapshot {
-  as_of: string;
-  source: string;
-  protocols: Protocol[];
-  watchlist: string[];
-}
-
-export const day = 86_400_000;
-export const dollars = (log: number) => Math.max(1, Math.round(10 ** log));
-export const logCap = (p: Protocol) => Math.log10(p.mcap_usd!);
-export const size = (p: Protocol) => Math.log10(p.tvl_usd) - 8;
-export const comparable = (p: Protocol) => p.tvl_usd > 0 && (p.mcap_usd ?? 0) > 0 && p.category !== 'CEX';
-export const anchor = (p: Protocol) => comparable(p) && Boolean(p.gecko_id);
-export const order = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
-export const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
-export const labels = ['Baseline', 'TVL', '7-day flow proxy', 'Listing age', 'Chain breadth', 'Sector', 'Category'];
-
-export function quantile(values: number[], p: number) {
-  const sorted = [...values].sort((a, b) => a - b);
-  const at = p * (sorted.length - 1);
-  const lo = Math.floor(at);
-  return sorted[lo] + (sorted[Math.ceil(at)] - sorted[lo]) * (at - lo);
-}
-
-function sector(category: string) {
-  if (/bridge|chain|privacy/i.test(category)) return 'Infrastructure';
-  if (/stak|index|allocator|yield aggregat/i.test(category)) return 'Managed exposure';
-  if (/dex|derivative|perpetual|option|prediction|basis|liquidity/i.test(category)) return 'Trading';
-  if (/lend|cdp|collateral|credit/i.test(category)) return 'Credit';
-  return category;
-}
-
-type Term = [number, number];
-const specs = [
-  {name: 'Pooled size', features: [], pooling: false},
-  {name: 'Sector and category', features: [], pooling: true},
-  {name: 'Sector, flow and age', features: [2, 3], pooling: true},
-  {name: 'Sector and all signals', features: [2, 3, 4], pooling: true},
+export interface Snapshot { as_of: string; source: string; protocols: Protocol[]; watchlist: string[]; }
+export const day=86400000;
+export const dollars=(log:number)=>Math.max(1,Math.round(10**log));
+export const logCap=(p:Protocol)=>Math.log10(p.mcap_usd!);
+export const size=(p:Protocol)=>Math.log10(p.tvl_usd)-8;
+export const comparable=(p:Protocol)=>p.tvl_usd>0&&(p.mcap_usd??0)>0&&p.category!=='CEX';
+export const anchor=(p:Protocol)=>comparable(p)&&Boolean(p.gecko_id);
+export const order=(a:string,b:string)=>a<b?-1:a>b?1:0;
+export const clamp=(x:number,lo:number,hi:number)=>Math.max(lo,Math.min(hi,x));
+export const quantile=(values:number[],p:number)=>{const s=[...values].sort((a,b)=>a-b),at=p*(s.length-1),lo=Math.floor(at);return s[lo]+(s[Math.ceil(at)]-s[lo])*(at-lo);};
+const sector=(c:string)=>/bridge|chain|privacy/i.test(c)?'Infrastructure':/stak|index|allocator|yield aggregat/i.test(c)?'Managed exposure':/dex|derivative|perpetual|option|prediction|basis|liquidity/i.test(c)?'Trading':/lend|cdp|collateral|credit/i.test(c)?'Credit':c;
+type Spec={name:string;signals:boolean;peer?:boolean;sector?:boolean;robust?:boolean;hinge?:boolean;curve?:boolean;quadratic?:boolean;local?:boolean;recency:number;huber?:number;peerK?:number};
+export const specs:Spec[]=[
+ {name:'Size only',signals:false,recency:1},{name:'Size + category',signals:false,peer:true,recency:1},
+ {name:'Shrinkage + category',signals:true,peer:true,recency:1},{name:'Robust shrinkage + category',signals:true,peer:true,robust:true,recency:1},
+ {name:'Piecewise shrinkage + category',signals:true,peer:true,hinge:true,recency:1},{name:'Shrinkage without category',signals:true,recency:1},
+ {name:'Robust size + sector',signals:false,robust:true,sector:true,recency:1},{name:'Shrinkage + sector',signals:true,sector:true,recency:1},
+ {name:'Robust shrinkage + sector',signals:true,sector:true,robust:true,recency:1},
+ {name:'Category curve robust',signals:true,peer:true,curve:true,robust:true,recency:1},
+ {name:'Category curve recent',signals:true,peer:true,curve:true,robust:true,recency:2},
+ {name:'Category curve recent strong',signals:true,peer:true,curve:true,robust:true,recency:3},
+ {name:'Robust sector delta',signals:true,sector:true,robust:true,recency:1,huber:.8,peerK:2},
+ {name:'Robust sector tight',signals:true,sector:true,robust:true,recency:1,huber:.35,peerK:2},
+ {name:'Quadratic robust sector',signals:true,sector:true,robust:true,quadratic:true,recency:1,huber:.55,peerK:4},
+ {name:'Quadratic recent sector',signals:true,sector:true,robust:true,quadratic:true,recency:2,huber:.55,peerK:4},
+ {name:'Local sector residual',signals:true,sector:true,robust:true,local:true,recency:1,huber:.55,peerK:4},
+ {name:'Local recent residual',signals:true,sector:true,robust:true,local:true,recency:2,huber:.55,peerK:4},
 ];
-type Spec = typeof specs[number];
-
-// Penalized log-cap regression. Coordinate descent updates a shared residual so
-// correlated category and sector effects are shrunk jointly, rather than stacked.
-export function fit(train: Protocol[], snapshotDate: string, spec: Spec) {
-  const category = (p: Protocol) => p.category ?? 'Unclassified';
-  const groups = [...new Set(train.map(category))].sort(order);
-  const sectors = [...new Set(groups.map(sector))].sort(order);
-  const categoryIndex = new Map(groups.map((group, i) => [group, 5 + sectors.length + i]));
-  const sectorIndex = new Map(sectors.map((group, i) => [group, 5 + i]));
-  const observedAt = Date.parse(snapshotDate);
-  function terms(p: Protocol): Term[] {
-    const age = (observedAt - Date.parse(p.listed_at ?? '')) / day;
-    const x = [
-      1, size(p),
-      Math.asinh(clamp(p.change_7d ?? 0, -100, 100) / 20),
-      Number.isFinite(age) ? Math.log10(1 + Math.max(0, age) / 365) - 0.5 : 0,
-      Math.log2(Math.max(1, p.chains.length)),
-    ];
-    const result: Term[] = [0, 1, ...spec.features].map(i => [i, x[i]]);
-    if (spec.pooling) {
-      for (const i of [sectorIndex.get(sector(category(p))), categoryIndex.get(category(p))]) {
-        if (i !== undefined) result.push([i, 1]);
-      }
-    }
-    return result;
-  }
-  const columns: Term[][] = Array.from({length: 5 + sectors.length + groups.length}, () => []);
-  train.forEach((p, j) => terms(p).forEach(([i, x]) => columns[i].push([j, x])));
-  const beta = columns.map(() => 0);
-  const residual = train.map(logCap);
-  const weights = train.map(() => 1);
-  for (let pass = 0; pass < 5; pass++) {
-    if (pass > 0) residual.forEach((e, j) => { weights[j] = Math.min(1, 0.6 / Math.max(1e-9, Math.abs(e))); });
-    for (let sweep = 0; sweep < 32; sweep++) {
-      for (const [i, column] of columns.entries()) {
-        if (!column.length) continue;
-        const penalty = i === 0 ? 0 : i === 1 ? 1 : i < 5 ? 8 : i < 5 + sectors.length ? 5 : 8;
-        let numerator = 0;
-        let denominator = penalty;
-        for (const [j, x] of column) {
-          numerator += weights[j] * x * (residual[j] + beta[i] * x);
-          denominator += weights[j] * x * x;
-        }
-        const next = denominator > 0 ? numerator / denominator : 0;
-        const delta = next - beta[i];
-        beta[i] = next;
-        for (const [j, x] of column) residual[j] -= delta * x;
-      }
-    }
-  }
-  return (p: Protocol) => {
-    const parts = labels.map(() => 0);
-    for (const [i, x] of terms(p)) {
-      const part = i < 5 ? i : i < 5 + sectors.length ? 5 : 6;
-      parts[part] += beta[i] * x;
-    }
-    return {parts, log: parts.reduce((a, b) => a + b, 0)};
-  };
-}
-
-const loss = (e: number) => Math.min(Math.abs(e), 1.5);
-export function metrics(errors: number[]) {
-  return {
-    n: errors.length,
-    median: errors.length ? 10 ** quantile(errors.map(Math.abs), 0.5) : null,
-    hits: errors.filter(e => Math.abs(e) <= Math.log10(3)).length,
-  };
-}
-
-function choose(date: string, splits: {train: Protocol[]; valid: Protocol[]}[]) {
-  return specs.map(spec => ({
-    spec,
-    loss: splits.reduce((sum, {train, valid}) => {
-      const predict = fit(train, date, spec);
-      return sum + valid.reduce((total, p) => total + loss(logCap(p) - predict(p).log), 0);
-    }, 0),
-  })).sort((a, b) => a.loss - b.loss)[0].spec;
-}
-
-function inner(rows: Protocol[]) {
-  // Keep tokens that share a known identity together during model selection.
-  const ids = [...new Set(rows.map(p => p.gecko_id ?? p.slug))].sort(order);
-  const partition = new Map(ids.map((id, i) => [id, i % 5]));
-  return Array.from({length: 5}, (_, fold) => ({
-    train: rows.filter(p => partition.get(p.gecko_id ?? p.slug) !== fold),
-    valid: rows.filter(p => partition.get(p.gecko_id ?? p.slug) === fold),
-  }));
-}
-
-export function calibrate(snapshot: Snapshot) {
-  const date = snapshot.as_of;
-  // Keep the declared accuracy comparison population stable across outer folds.
-  const comparableSet = snapshot.protocols.filter(comparable);
-  const anchors = comparableSet.filter(anchor);
-  const folds = comparableSet.map(p => {
-    const train = comparableSet.filter(q => q !== p);
-    const spec = choose(date, inner(train));
-    const {log} = fit(train, date, spec)(p);
-    return {slug: p.slug, actual: p.mcap_usd, predicted: dollars(log), error: logCap(p) - log, spec: spec.name};
-  });
-  const spec = choose(date, inner(anchors));
-  const errors = folds.map(p => p.error);
-  return {
-    anchors, spec, folds, summary: metrics(errors),
-    residualBand: [quantile(errors, 0.1), quantile(errors, 0.9)],
-    predict: fit(anchors, date, spec),
-  };
-}
-
-export function cohortReplay(snapshot: Snapshot, anchors: Protocol[]) {
-  const date = snapshot.as_of;
-  const windows = [2023, 2024, 2025, 2026].map(year => {
-    const validationStart = Date.UTC(year - 1, 0, 1);
-    const testStart = Date.UTC(year, 0, 1);
-    const testEnd = Date.UTC(year + 1, 0, 1);
-    const gap = 30 * day;
-    const listed = (p: Protocol) => Date.parse(p.listed_at ?? '');
-    const test = snapshot.protocols.filter(p => listed(p) >= testStart && listed(p) < testEnd);
-    const testTokens = new Set(test.map(p => p.gecko_id).filter(Boolean));
-    const older = anchors.filter(p => !testTokens.has(p.gecko_id));
-    const valid = older.filter(p => listed(p) >= validationStart && listed(p) < testStart - gap);
-    const validationTokens = new Set(valid.map(p => p.gecko_id));
-    const train = older.filter(p => listed(p) < validationStart - gap && !validationTokens.has(p.gecko_id));
-    const canSelect = train.length >= 8 && valid.length >= 3;
-    const spec = canSelect ? choose(date, [{train, valid}]) : specs[0];
-    const predict = fit([...train, ...valid], date, spec);
-    const predictions = test.map(p => {
-      const {log} = predict(p);
-      return {
-        slug: p.slug, year, predicted: dollars(log),
-        error: anchor(p) ? logCap(p) - log : null,
-      };
-    });
-    return {
-      year, spec: spec.name, canSelect, train: train.map(p => p.slug), valid: valid.map(p => p.slug),
-      predictions, gapDays: 30,
-      ...metrics(predictions.flatMap(p => p.error === null ? [] : [p.error])),
-    };
-  });
-  return {windows, ...metrics(windows.flatMap(w => w.predictions.flatMap(p => p.error === null ? [] : [p.error])))};
-}
-
-export function refitRanges(anchors: Protocol[], candidates: Protocol[], date: string, spec: Spec) {
-  const groups = new Map<string, Protocol[]>();
-  for (const p of anchors) {
-    const id = p.gecko_id ?? p.slug;
-    groups.set(id, [...(groups.get(id) ?? []), p]);
-  }
-  const blocks = [...groups.values()];
-  const draws = candidates.map(() => ({ranks: [] as number[], values: [] as number[]}));
-  let state = 50501;
-  const refits = 256;
-  for (let run = 0; run < refits; run++) {
-    const sample = blocks.flatMap(() => {
-      state = (Math.imul(1664525, state) + 1013904223) >>> 0;
-      return blocks[Math.floor(state / 2 ** 32 * blocks.length)];
-    });
-    const predict = fit(sample, date, spec);
-    const book = candidates.map((p, i) => ({i, slug: p.slug, value: dollars(predict(p).log)}))
-      .sort((a, b) => b.value - a.value || order(a.slug, b.slug));
-    book.forEach(({i, value}, rank) => {
-      draws[i].ranks.push(rank + 1);
-      draws[i].values.push(value);
-    });
-  }
-  return {refits, bySlug: new Map(candidates.map((p, i) => {
-    const {ranks, values} = draws[i];
-    return [p.slug, {
-      rankMin: Math.min(...ranks), rankMax: Math.max(...ranks),
-      rank80: [Math.floor(quantile(ranks, 0.1)), Math.ceil(quantile(ranks, 0.9))],
-      value80: [Math.round(quantile(values, 0.1)), Math.round(quantile(values, 0.9))],
-    }];
-  }))};
-}
+const labels=['Baseline','TVL','7-day flow proxy','Listing age','Chain breadth','Flow missing','Age missing','TVL above $100M','Category curve','Peer shift'];
+function recent(p:Protocol){const y=Date.parse(p.listed_at??'');return Number.isFinite(y)&&new Date(y).getUTCFullYear()>=2025;}
+function features(p:Protocol,date:string,spec:Spec,categories:Set<string>){const elapsed=(Date.parse(date)-Date.parse(p.listed_at??''))/day,age=Number.isFinite(elapsed)?Math.max(0,elapsed):null,c=p.category??'';return [1,size(p),...(spec.signals?[Math.asinh(clamp(p.change_7d??0,-100,200)/15),age===null?0:Math.log10(1+age/365)-.5,Math.log2(Math.max(1,p.chains.length)),Number(p.change_7d===null),Number(age===null)]:[]),...(spec.hinge?[Math.max(0,size(p))]:[]),...(spec.curve?[categories.has(c)?size(p):0]:[]),...(spec.quadratic?[size(p)*size(p)]:[])];}
+function solve(a:number[][]){const n=a.length;for(let i=0;i<n;i++){let pivot=i;for(let r=i+1;r<n;r++)if(Math.abs(a[r][i])>Math.abs(a[pivot][i]))pivot=r;[a[i],a[pivot]]=[a[pivot],a[i]];const d=a[i][i];if(Math.abs(d)<1e-10)throw new Error('Singular valuation fit');a[i]=a[i].map(v=>v/d);for(let r=0;r<n;r++)if(r!==i){const f=a[r][i];a[r]=a[r].map((v,j)=>v-f*a[i][j]);}}return a.map(r=>r[n]);}
+const dot=(x:number[],b:number[])=>x.reduce((s,v,i)=>s+v*b[i],0);
+export function fit(train:Protocol[],date:string,spec:Spec){const counts=new Map<string,number>();train.forEach(p=>counts.set(p.category??'',(counts.get(p.category??'')??0)+1));const categories=new Set([...counts].filter(([,n])=>n>=15).map(([c])=>c));const data=train.map(p=>({p,x:features(p,date,spec,categories),y:logCap(p)})),width=data[0].x.length;let beta=Array(width).fill(0),shifts=new Map<string,number>();const key=(p:Protocol)=>spec.sector?sector(p.category??''):p.category??'';const passes=spec.robust?6:(spec.peer||spec.sector?3:1);for(let pass=0;pass<passes;pass++){const m=Array.from({length:width},(_,i)=>Array.from({length:width+1},(_,j)=>i===j&&i>0?(i===1?1e-8:6):0));for(const {p,x,y} of data){const sh=shifts.get(key(p))??0,e=Math.abs(y-sh-dot(x,beta)),w=spec.robust&&pass>0?Math.min(1,(spec.huber??.55)/Math.max(1e-9,e)):1,rw=recent(p)?spec.recency:1;for(let i=0;i<width;i++){for(let j=0;j<width;j++)m[i][j]+=w*rw*x[i]*x[j];m[i][width]+=w*rw*x[i]*(y-sh);}}beta=solve(m);if(spec.peer||spec.sector){const rs=new Map<string,number[]>();for(const {p,x,y} of data){const g=rs.get(key(p))??[];g.push(clamp(y-dot(x,beta),-1.25,1.25));rs.set(key(p),g);}shifts=new Map([...rs].map(([k,v])=>[k,quantile(v,.5)*v.length/(v.length+(spec.peerK??4))]));}}const residuals=data.map(d=>({p:d.p,r:d.y-dot(d.x,beta)}));return(p:Protocol)=>{const x=features(p,date,spec,categories),sh=shifts.get(key(p))??0,parts=labels.map(()=>0);x.forEach((v,i)=>{parts[i]=v*beta[i];});parts[9]=sh;let log=parts.reduce((a,b)=>a+b,0);if(spec.local){const near=residuals.filter(d=>key(d.p)===key(p)).sort((a,b)=>Math.abs(size(a.p)-size(p))-Math.abs(size(b.p)-size(p))).slice(0,6);if(near.length){const w=near.map(d=>1/(.2+Math.abs(size(d.p)-size(p))));log+=near.reduce((s,d,i)=>s+w[i]*clamp(d.r,-1,1),0)/w.reduce((a,b)=>a+b,0)*.35;}}return{parts,log,peers:counts.get(p.category??'')??0};};}
+const loss=(e:number)=>Math.abs(e)/(Math.log10(3)+Math.abs(e));
+export function metrics(errors:number[]){return{n:errors.length,median:errors.length?10**quantile(errors.map(Math.abs),.5):null,hits:errors.filter(e=>Math.abs(e)<=Math.log10(3)).length};}
+function groups(rows:Protocol[]){const ids=[...new Set(rows.map(p=>p.gecko_id??p.slug))].sort(order),part=new Map(ids.map((id,i)=>[id,i%5]));return Array.from({length:5},(_,f)=>({train:rows.filter(p=>part.get(p.gecko_id??p.slug)!==f),valid:rows.filter(p=>part.get(p.gecko_id??p.slug)===f)}));}
+function choose(date:string,splits:{train:Protocol[];valid:Protocol[]}[]){return specs.map(spec=>({spec,loss:splits.reduce((sum,s)=>{const pred=fit(s.train,date,spec);return sum+s.valid.reduce((t,p)=>t+loss(logCap(p)-pred(p).log),0)},0)})).sort((a,b)=>a.loss-b.loss)[0].spec;}
+function inner(rows:Protocol[]){return groups(rows);}
+function innerFive(rows:Protocol[],date:string){const errors:number[]=[];for(const split of groups(rows)){const pred=fit(split.train,date,choose(date,groups(split.train)));split.valid.forEach(p=>errors.push(logCap(p)-pred(p).log));}return metrics(errors);}
+function temporalTen(rows:Protocol[],date:string){const sorted=[...rows].sort((a,b)=>Date.parse(a.listed_at??'')-Date.parse(b.listed_at??'')||order(a.slug,b.slug)),errors:number[]=[];for(let f=1;f<10;f++){const cut=Math.floor(sorted.length*f/10),train=sorted.slice(0,cut),valid=sorted.slice(cut,Math.floor(sorted.length*(f+1)/10));if(train.length<8||!valid.length)continue;const pred=fit(train,date,choose(date,inner(train)));valid.forEach(p=>errors.push(logCap(p)-pred(p).log));}return metrics(errors);}
+export function calibrate(snapshot:Snapshot){const date=snapshot.as_of,rows=snapshot.protocols.filter(comparable),anchors=rows.filter(anchor),folds=rows.map(p=>{const train=rows.filter(q=>q!==p),spec=choose(date,inner(train)),pred=fit(train,date,spec)(p);return{slug:p.slug,actual:p.mcap_usd,predicted:dollars(pred.log),error:logCap(p)-pred.log,spec:spec.name};}),spec=choose(date,inner(anchors)),errors=folds.map(f=>f.error),residuals=anchors.map(p=>{const train=anchors.filter(q=>q!==p);return logCap(p)-fit(train,date,choose(date,inner(train)))(p).log;}),temporal=temporalTen(anchors,date);return{anchors,spec,folds,summary:metrics(errors),residualBand:[quantile(errors,.1),quantile(errors,.9)],predict:fit(anchors,date,spec),four:{loo:metrics(errors),inner5:innerFive(anchors,date),temporal10:temporal,walkForward:null},residuals};}
+export function peerOdds(p:Protocol,cal:ReturnType<typeof calibrate>,date:string){const pool=cal.anchors.filter(a=>(a.category??'')===(p.category??'')),residuals=pool.length>=8?pool.map(a=>cal.folds.find(f=>f.slug===a.slug)?.error??0):cal.residuals,ageDays=(Date.parse(date)-Date.parse(p.listed_at??date))/day,decay=Math.exp(-Math.max(0,ageDays)/3650),base=residuals.filter(r=>Math.abs(r)<=Math.log10(3)).length/Math.max(1,residuals.length);return{probability:Math.round(clamp(base*decay,.01,.99)*1000)/10,observed:Math.round(residuals.filter(r=>Math.abs(r)<=Math.log10(3)).length/Math.max(1,residuals.length)*1000)/10,n:residuals.length,ageDecay:decay};}
+export function cohortReplay(snapshot:Snapshot,anchors:Protocol[]){const date=snapshot.as_of,windows=[2023,2024,2025,2026].map(year=>{const start=Date.UTC(year,0,1),end=Date.UTC(year+1,0,1),listed=(p:Protocol)=>Date.parse(p.listed_at??''),test=snapshot.protocols.filter(p=>listed(p)>=start&&listed(p)<end),ids=new Set(test.map(p=>p.gecko_id).filter(Boolean)),older=anchors.filter(p=>!ids.has(p.gecko_id)),valid=older.filter(p=>listed(p)>=Date.UTC(year-1,0,1)&&listed(p)<start-30*day),train=older.filter(p=>listed(p)<Date.UTC(year-1,0,1)-30*day&&!valid.some(v=>(v.gecko_id??v.slug)===(p.gecko_id??p.slug))),canSelect=train.length>=8&&valid.length>=3,spec=canSelect?choose(date,[{train,valid}]):specs[0],pred=fit([...train,...valid],date,spec),predictions=test.map(p=>({slug:p.slug,year,predicted:dollars(pred(p).log),error:anchor(p)?logCap(p)-pred(p).log:null}));return{year,spec:spec.name,canSelect,train:train.map(p=>p.slug),valid:valid.map(p=>p.slug),predictions,gapDays:30,...metrics(predictions.flatMap(p=>p.error===null?[]:[p.error]))};});return{windows,...metrics(windows.flatMap(w=>w.predictions.flatMap(p=>p.error===null?[]:[p.error])))};}
+export function refitRanges(anchors:Protocol[],candidates:Protocol[],date:string,spec:Spec){const byId=new Map<string,Protocol[]>();for(const p of anchors){const id=p.gecko_id??p.slug;byId.set(id,[...(byId.get(id)??[]),p]);}const blocks=[...byId.values()],draws=candidates.map(()=>({ranks:[] as number[],values:[] as number[]}));let state=50501;for(let run=0;run<256;run++){const sample=blocks.flatMap(()=>{state=(Math.imul(1664525,state)+1013904223)>>>0;return blocks[Math.floor(state/2**32*blocks.length)]});const pred=fit(sample,date,spec),book=candidates.map((p,i)=>({i,slug:p.slug,value:dollars(pred(p).log)})).sort((a,b)=>b.value-a.value||order(a.slug,b.slug));book.forEach(({i,value},rank)=>{draws[i].ranks.push(rank+1);draws[i].values.push(value);});}return{refits:256,bySlug:new Map(candidates.map((p,i)=>{const {ranks,values}=draws[i];return[p.slug,{rankMin:Math.min(...ranks),rankMax:Math.max(...ranks),rank80:[Math.floor(quantile(ranks,.1)),Math.ceil(quantile(ranks,.9))],value80:[Math.round(quantile(values,.1)),Math.round(quantile(values,.9))]}]}))};}

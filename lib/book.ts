@@ -1,4 +1,4 @@
-import {anchor, calibrate, cohortReplay, dollars, order, refitRanges, type Protocol, type Snapshot} from './model.ts';
+import {anchor, calibrate, cohortReplay, dollars, order, peerOdds, refitRanges, type Protocol, type Snapshot} from './model.ts';
 
 const excluded = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
 const categoryOf = (p: Protocol) => p.category ?? 'Unclassified';
@@ -114,8 +114,9 @@ export function build(s: Snapshot) {
     const {parts, log} = fit.predict(p);
     const implied_value_usd = dollars(log);
     const band = fit.residualBand.map(e => dollars(log + e));
+    const odds = peerOdds(p, fit, s.as_of);
     const economics = farm(p, classification.status, implied_value_usd, band);
-    return {...p, ...classification, parts, implied_value_usd, band,
+    return {...p, ...classification, parts, implied_value_usd, band, odds,
       farm: economics, farm_steps: steps(p, economics),
       loo: loo.get(p.slug) ?? null,
       replay: cohortRows.get(p.slug) ?? null,
@@ -127,5 +128,9 @@ export function build(s: Snapshot) {
     .map((r, i) => ({...r, rank: i + 1}));
   if (rows.length < 100 || rows.filter(r => r.watch).length !== watches.size) throw new Error('Incomplete launch book');
   return {rows, ledger, asOf: s.as_of, source: s.source, watchlistSize: watches.size,
-    validation: {loo: fit.summary, folds: fit.folds, replay, refits: refits.refits, model: fit.spec.name}};
+    validation: {loo: fit.summary, folds: fit.folds, replay, refits: refits.refits, model: fit.spec.name,
+      heldOutFour: {...fit.four, walkForward: replay}, oddsCalibration: {
+        claimed: ledger.filter(r => r.odds).map(r => r.odds.probability),
+        observed: ledger.filter(r => r.odds).map(r => r.odds.observed),
+      }}};
 }
