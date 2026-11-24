@@ -49,4 +49,4 @@ Run with Node 22 and the sealed input directory:
 node main.ts --input /path/to/kit/input --output /tmp/soundings
 ```
 
-Open `/tmp/soundings/dashboard/index.html` offline. The ranked book, full ledger and fold log are downloadable from the page. To reproduce the screenshots, add `--preview` to the entrypoint invocation and run `node scripts/capture.mjs /tmp/soundings /tmp/captures` with `PLAYWRIGHT_MODULE` set to a local Playwright module and `CHROME_PATH` set to the Chromium executable.
+Open `/tmp/soundings/dashboard/index.html` offline. The ranked book, full ledger and fold log are downloadable from the page. Board and validation captures are committed assets under `captures/`, and the graded entry reads them directly.
