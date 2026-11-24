@@ -1,10 +1,11 @@
-import {anchor, calibrate, cohortReplay, dollars, order, peerOdds, refitRanges, type Protocol, type Snapshot} from './model.ts';
+import {anchor, calibrate, cohortReplay, dollars, order, peerOdds, quantile, refitRanges, type Protocol, type Snapshot} from './model.ts';
 
 const excluded = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
 const categoryOf = (p: Protocol) => p.category ?? 'Unclassified';
 const ticketSizes = [250, 500, 1000, 2500, 5000];
 const lowCost = new Set(['Base', 'Arbitrum', 'Optimism', 'BSC', 'Polygon', 'Avalanche', 'Linea', 'Scroll']);
 const gas = (chain: string) => chain === 'Ethereum' ? 12 : chain === 'Solana' ? 0.05 : lowCost.has(chain) ? 0.3 : 1;
+const equationLabels = ['base', 'tvl', 'flow', 'age', 'chains', 'flowMissing', 'ageMissing', 'largeTvl', 'curve', 'peerShift'];
 
 function exposure(p: Protocol) {
   const flags = [
@@ -110,13 +111,36 @@ export function build(s: Snapshot) {
   const cohortRows = new Map(replay.windows.flatMap(w => w.predictions.map(p => [p.slug, p] as const)));
   const loo = new Map(fit.folds.map(fold => [fold.slug, fold]));
   const refits = refitRanges(fit.anchors, scoped.filter(r => r.status === 'Launch').map(r => r.p), s.as_of, fit.spec);
+  const globalErrors = fit.folds.map(f => f.error);
+  const errorsByKind = new Map<string, number[]>();
+  for (const p of fit.anchors) {
+    const error = loo.get(p.slug)?.error;
+    if (error === undefined) continue;
+    const kind = categoryOf(p);
+    errorsByKind.set(kind, [...(errorsByKind.get(kind) ?? []), error]);
+  }
+  const intervalFor = (p: Protocol, value: number, economics: ReturnType<typeof farm>) => {
+    const errors = errorsByKind.get(categoryOf(p));
+    const usable = errors && errors.length >= 5 ? errors : globalErrors;
+    const lowError = Math.max(-1.25, Math.min(1.25, quantile(usable, .1)));
+    const highError = Math.max(-1.25, Math.min(1.25, quantile(usable, .9)));
+    const low = dollars(Math.log10(value) + lowError);
+    const high = dollars(Math.log10(value) + highError);
+    const price = Math.max(0, economics.base.gross - economics.base.gross * Math.min(1, low / Math.max(1, value)));
+    return {kind: categoryOf(p), n: usable.length, low, high, lowError, highError, price};
+  };
   const ledger = scoped.map(({p, ...classification}) => {
-    const {parts, log} = fit.predict(p);
+    const prediction = fit.predict(p);
+    const log = prediction.log;
+    const parts = [...prediction.parts];
+    parts[parts.length - 1] += log - parts.reduce((sum, part) => sum + part, 0);
     const implied_value_usd = dollars(log);
     const band = fit.residualBand.map(e => dollars(log + e));
     const odds = peerOdds(p, fit, s.as_of);
     const economics = farm(p, classification.status, implied_value_usd, band);
-    return {...p, ...classification, parts, implied_value_usd, band, odds,
+    const conformal = intervalFor(p, implied_value_usd, economics);
+    const equation = 'cap = 10^(' + parts.map((part, i) => `${equationLabels[i]}:${part.toFixed(4)}`).join(' + ') + ')';
+    return {...p, ...classification, parts, equation, implied_value_usd, band, conformal, odds,
       farm: economics, farm_steps: steps(p, economics),
       loo: loo.get(p.slug) ?? null,
       replay: cohortRows.get(p.slug) ?? null,
@@ -127,10 +151,18 @@ export function build(s: Snapshot) {
     .sort((a, b) => b.implied_value_usd - a.implied_value_usd || order(a.slug, b.slug))
     .map((r, i) => ({...r, rank: i + 1}));
   if (rows.length < 100 || rows.filter(r => r.watch).length !== watches.size) throw new Error('Incomplete launch book');
+  const quarantineReasons = Object.fromEntries([...scoped.filter(r => r.status === 'Quarantine').reduce((m, r) => m.set(r.reason, (m.get(r.reason) ?? 0) + 1), new Map<string, number>())].sort((a, b) => a[0].localeCompare(b[0])));
+  const missingListingDates = ledger.filter(r => !r.listed_at).length;
+  const outsideTestWindows = ledger.filter(r => r.replayStatus === 'Outside test years').length;
+  const farmCounts = Object.fromEntries(['FARM', 'THIN', 'SKIP'].map(verdict => [verdict, rows.filter(r => r.farm.verdict === verdict).length]));
+  const conformalKinds = [...new Set(ledger.map(r => r.conformal.kind))].sort().map(kind => {
+    const values = ledger.filter(r => r.conformal.kind === kind).map(r => r.conformal);
+    return {kind, n: values[0]?.n ?? 0, low: Math.round(quantile(values.map(v => v.low), .5)), high: Math.round(quantile(values.map(v => v.high), .5)), price: Math.round(quantile(values.map(v => v.price), .5) * 100) / 100};
+  });
   return {rows, ledger, asOf: s.as_of, source: s.source, watchlistSize: watches.size,
     validation: {loo: fit.summary, folds: fit.folds, replay, refits: refits.refits, model: fit.spec.name,
       heldOutFour: {...fit.four, walkForward: replay}, oddsCalibration: {
         claimed: ledger.filter(r => r.odds).map(r => r.odds.probability),
         observed: ledger.filter(r => r.odds).map(r => r.odds.observed),
-      }}};
+      }, integrity: {protocols: ledger.length, anchors: fit.anchors.length, quarantined: scoped.filter(r => r.status === 'Quarantine').length, quarantineReasons, missingListingDates, outsideTestWindows, refits: refits.refits}, farmCounts, conformalKinds}};
 }

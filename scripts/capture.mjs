@@ -8,11 +8,14 @@ const [preview, destination] = process.argv.slice(2);
 if (!preview || !destination || !process.env.PLAYWRIGHT_MODULE) {
   throw Error('Set PLAYWRIGHT_MODULE and pass the preview directory and capture destination');
 }
-const {chromium} = await import(process.env.PLAYWRIGHT_MODULE);
+const playwright = await import(process.env.PLAYWRIGHT_MODULE);
+const {chromium} = playwright.default ?? playwright;
 const browser = await chromium.launch({executablePath: process.env.CHROME_PATH, args: ['--no-sandbox']});
 await mkdir(destination, {recursive:true});
 try {
-  const page = await browser.newPage({viewport:{width:1440,height:900}, deviceScaleFactor:1});
+  const width = Number(process.env.VIEWPORT_WIDTH ?? 1440);
+  const height = Number(process.env.VIEWPORT_HEIGHT ?? 900);
+  const page = await browser.newPage({viewport:{width, height}, deviceScaleFactor:1});
   page.setDefaultTimeout(12000);
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -23,10 +26,10 @@ try {
   assert.equal(mismatch, 0);
   const take = name => page.screenshot({path: join(destination, name + '.jpg'), type:'jpeg', quality:94, animations:'disabled'});
   await take('01-board');
-  await page.locator('#rows button').nth(1).click();
-  await page.locator('#runbook summary').click();
-  await page.locator('#detail').evaluate(el => { el.scrollTop = 230; });
-  await take('02-farm-detail');
+  await page.locator('[data-view=validation]').click();
+  assert.match(await page.locator('#extra').innerText(), /CONFORMAL PRICING|Priced prediction intervals/);
+  await take('02-validation');
+  await page.locator('[data-view=launch]').click();
   await page.locator('#scope').selectOption({label:'Watchlist · 40'});
   await page.locator('#sort').selectOption({label:'Farm net'});
   assert.equal(await page.locator('#rows tr').count(), 40);
